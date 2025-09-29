@@ -1,0 +1,95 @@
+-- Step 4.1: Extract Raw Data
+SELECT
+  O_ORDERKEY,         
+  O_CUSTKEY     AS customer_id,
+  O_TOTALPRICE  AS purchase_amount,
+  O_ORDERDATE   AS purchase_date,
+  O_ORDERSTATUS AS order_status
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+WHERE O_ORDERDATE >= '1995-01-01'; 
+
+--step 4.2:Transform: Perform feature engineering (aggregations, encoding, etc.).
+-- 4.2.1 total / avg / total_spent per customer(Aggregates per customer)
+SELECT
+  O_CUSTKEY AS customer_id,
+  COUNT(*)           AS total_orders,
+  SUM(O_TOTALPRICE)  AS total_spent,
+  AVG(O_TOTALPRICE)  AS avg_order_amount
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+GROUP BY O_CUSTKEY;
+
+
+-- 4.2.2 recency and last order date(Recency / last order)
+SELECT
+  O_CUSTKEY AS customer_id,
+  MAX(O_ORDERDATE) AS last_order_date,
+  DATEDIFF(day, MAX(O_ORDERDATE), CURRENT_DATE) AS days_since_last_order
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+GROUP BY O_CUSTKEY;
+
+-- 4.2.3 orders in last 30 and 7 days(Recent activity (rolling windows)
+SELECT
+  O_CUSTKEY AS customer_id,
+  SUM(CASE WHEN O_ORDERDATE >= DATEADD(day, -30, CURRENT_DATE) THEN 1 ELSE 0 END) AS orders_last_30_days,
+  SUM(CASE WHEN O_ORDERDATE >= DATEADD(day, -7, CURRENT_DATE) THEN 1 ELSE 0 END)  AS orders_last_7_days
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+GROUP BY O_CUSTKEY;
+
+
+-- 4.2.4 active flag: at least one order in last 7 days(Simple encoding / flags)
+SELECT
+  O_CUSTKEY AS customer_id,
+  CASE WHEN MAX(O_ORDERDATE) >= DATEADD(day, -7, CURRENT_DATE) THEN 1 ELSE 0 END AS active_last_7_days
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+GROUP BY O_CUSTKEY;
+
+
+--4.3 LOAD into Feature Store — how to store engineered features
+-- 4.3.1 Create a feature database (only once)
+CREATE OR REPLACE DATABASE MY_DB;
+
+-- 4.3.2 Create a schema inside it
+CREATE OR REPLACE SCHEMA MY_DB.WORKING_SCHEMA;
+
+-- 4.3.3 Set context
+USE DATABASE MY_DB;
+USE SCHEMA WORKING_SCHEMA;
+
+-- 4.3.4 Create a feature store table
+CREATE OR REPLACE TABLE customer_feature_store AS
+SELECT
+  O_CUSTKEY AS customer_id,
+  COUNT(*)           AS total_orders,
+  SUM(O_TOTALPRICE)  AS total_spent,
+  AVG(O_TOTALPRICE)  AS avg_order_amount,
+  MAX(O_ORDERDATE)   AS last_order_date,
+  DATEDIFF(day, MAX(O_ORDERDATE), CURRENT_DATE) AS days_since_last_order,
+  SUM(CASE WHEN O_ORDERDATE >= DATEADD(day, -30, CURRENT_DATE) THEN 1 ELSE 0 END) AS orders_last_30_days,
+  SUM(CASE WHEN O_ORDERDATE >= DATEADD(day, -7, CURRENT_DATE) THEN 1 ELSE 0 END)  AS orders_last_7_days,
+  CASE WHEN MAX(O_ORDERDATE) >= DATEADD(day, -7, CURRENT_DATE) THEN 1 ELSE 0 END AS active_last_7_days
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS
+GROUP BY O_CUSTKEY;
+
+--4.4 ACCESS FOR ML — How ML models retrieve features
+--A. Batch training (example: join features with labels inside Snowflake)
+-- prepare training dataset inside Snowflake
+
+--Step 1: Create a sample labels table (for demonstration purposes): Sample labels for training demonstration
+CREATE OR REPLACE TABLE MY_DB.WORKING_SCHEMA.customer_labels AS
+SELECT customer_id,
+       CASE WHEN MOD(customer_id, 2) = 0 THEN 1 ELSE 0 END AS label
+FROM MY_DB.WORKING_SCHEMA.customer_feature_store;
+
+--Step 2: Join features with labels to create a training dataset:Prepare training dataset inside Snowflake
+CREATE OR REPLACE TABLE MY_DB.WORKING_SCHEMA.training_dataset AS
+SELECT f.*, l.label
+FROM MY_DB.WORKING_SCHEMA.customer_feature_store f
+JOIN MY_DB.WORKING_SCHEMA.customer_labels l
+  ON f.customer_id = l.customer_id;
+
+--Step 3: Verify the training dataset
+SELECT * FROM MY_DB.WORKING_SCHEMA.training_dataset
+LIMIT 10;
+
+
+
